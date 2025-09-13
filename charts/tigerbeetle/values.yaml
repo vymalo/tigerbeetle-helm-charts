@@ -1,0 +1,37 @@
+defaultPodOptions:
+  automountServiceAccountToken: false
+  securityContext:
+    # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
+    # unless specific non-root user requirements are identified.
+
+controllers:
+  main:
+    type: statefulset
+    replicas: 3 # This will be made dynamic later with a helper
+    containers:
+      main:
+        image:
+          repository: ghcr.io/tigerbeetle/tigerbeetle
+          tag: "0.16.57"
+          pullPolicy: IfNotPresent
+        command: ["start"]
+        securityContext:
+          seccompProfile:
+            type: Unconfined
+    statefulset:
+      volumeClaimTemplates:
+        - name: data
+          mountPath: /data
+          accessMode: "ReadWriteOnce"
+          size: 1Gi
+          storageClass: "" # Use default storage class or specify one
+
+service:
+  main:
+    controller: main
+    type: ClusterIP
+    ports:
+      http:
+        port: 3001
+        targetPort: 3001
+        protocol: TCP

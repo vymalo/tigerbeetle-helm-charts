@@ -1,0 +1,36 @@
+# Files to ignore when packaging Helm charts
+# This file is a .gitignore-like file that specifies patterns for files
+# that should be excluded from the chart package.
+# Lines starting with '#' are comments.
+
+# Common files to ignore
+.DS_Store
+.git/
+.gitignore
+.helmignore
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.log
+*.orig
+*.rej
+*~
+.#*
+# Test and development files
+tmp/
+temp/
+test/
+tests/
+.idea/
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfplan
+# Kubernetes specific files
+*.kubeconfig
+# Other common build artifacts
+target/
+dist/
+build/
