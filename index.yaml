@@ -1,0 +1,29 @@
+apiVersion: v1
+entries:
+  tigerbeetle:
+  - annotations:
+      category: Application
+    apiVersion: v2
+    appVersion: 0.2.20
+    created: "2025-09-13T22:46:40.394053413Z"
+    dependencies:
+    - name: common
+      repository: https://bjw-s-labs.github.io/helm-charts
+      tags:
+      - common
+      - bjw
+      version: 4.2.0
+    description: A Helm chart for deploying a TigerBeetle cluster.
+    digest: 643fc3f69aef9c9f93801f5357081cd472c11e2630364a19830c4618b09048c5
+    home: https://github.com/vymlao/tigerbeetle-helm-charts
+    maintainers:
+    - email: selastlambou@gmail.com
+      name: Stephane Segning Lambou
+    name: tigerbeetle
+    sources:
+    - https://github.com/vymlao/tigerbeetle-helm-charts
+    type: application
+    urls:
+    - https://github.com/vymalo/tigerbeetle-helm-charts/releases/download/tigerbeetle-0.9.0/tigerbeetle-0.9.0.tgz
+    version: 0.9.0
+generated: "2025-09-13T22:46:40.394080293Z"
