@@ -4,16 +4,15 @@ global:
 
 defaultPodOptions:
   automountServiceAccountToken: false
-  securityContext:
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  cluster: tigerbeetle
-              topologyKey: kubernetes.io/hostname
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                cluster: tigerbeetle
+            topologyKey: kubernetes.io/hostname
   # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
   # unless specific non-root user requirements are identified.
 
@@ -29,6 +28,14 @@ controllers:
           pullPolicy: IfNotPresent
         imagePullPolicy: IfNotPresent
         command: [ "/bin/sh","-c" ]
+        
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          seccompProfile:
+            type: Unconfined
+            
         args:
           - |
             set -euo pipefail
@@ -56,6 +63,11 @@ controllers:
           tag: "{{ .Chart.AppVersion }}"
           pullPolicy: IfNotPresent
         command: [ "start" ]
+        
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
     statefulset:
       podManagementPolicy: Parallel
       volumeClaimTemplates:
@@ -64,7 +76,7 @@ controllers:
           accessMode: "ReadWriteOnce"
           size: 1Gi
           storageClass: "" # Use default storage class or specify one
-
+          
 service:
   main:
     controller: main
