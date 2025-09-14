@@ -18,7 +18,7 @@ configMaps:
   config:
     enabled: true
     data:
-      REPLICA_COUNT: {{ .Values.controllers.main.replicas | int }}
+      REPLICA_COUNT: "{{ .Values.controllers.main.replicas }}"
 {{ end -}}
 
 {{- define "tigerbeetle.addresses" -}}
