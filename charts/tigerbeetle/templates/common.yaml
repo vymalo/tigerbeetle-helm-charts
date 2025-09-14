@@ -1,7 +1,7 @@
 ---
-{{ include "bjw-s.common.loader.init" . }}
+{{ include "bjw-s.common.loader.init" $ }}
 
-{{ $_ := mergeOverwrite .Values (include "tigerbeetle.hardcodedValues" . | fromYaml) }}
+{{ $_ := mergeOverwrite .Values (include "tigerbeetle.hardcodedValues" $ | fromYaml) }}
 
 {{/* Render the templates */}}
-{{ include "bjw-s.common.loader.generate" . }}
+{{ include "bjw-s.common.loader.generate" $ }}

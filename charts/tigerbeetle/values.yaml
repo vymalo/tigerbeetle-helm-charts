@@ -1,24 +1,64 @@
+global:
+  version: "0.16.57"
+  labels:
+    cluster: tigerbeetle
+
 defaultPodOptions:
   automountServiceAccountToken: false
   securityContext:
-    # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
-    # unless specific non-root user requirements are identified.
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  cluster: tigerbeetle
+              topologyKey: kubernetes.io/hostname
+  # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
+  # unless specific non-root user requirements are identified.
 
 controllers:
   main:
     type: statefulset
-    replicas: 3 # This will be made dynamic later with a helper
+    replicas: 3 # In the current version of TigerBeetle, cluster size can not be changed after creation, but this limitation will be lifted in the future.
+    initContainers:
+      format:
+        image:
+          repository: ghcr.io/tigerbeetle/tigerbeetle
+          tag: "{{ .Values.global.version }}"
+          pullPolicy: IfNotPresent
+        imagePullPolicy: IfNotPresent
+        command: [ "/bin/sh","-c" ]
+        args:
+          - |
+            set -euo pipefail
+            REPLICA_INDEX="${HOSTNAME##*-}"
+            if [ -f "/data/data.tigerbeetle" ]; then
+              echo "Data file already exists, skipping format."
+              exit 0
+            fi
+            
+            echo "Formatting data file for replica index ${REPLICA_INDEX}"
+            /tigerbeetle format \
+              --cluster="${CLUSTER_ID}" \
+              --replica-count="${REPLICA_COUNT}" \
+              --replica="${REPLICA_INDEX}" \
+              "/data/data.tigerbeetle"
+        envFrom:
+          - configMapRef:
+              identifier: config
+          - secretRef:
+              identifier: config
     containers:
       main:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
-          tag: "0.16.57"
+          tag: "{{ .Values.global.version }}"
           pullPolicy: IfNotPresent
-        command: ["start"]
-        securityContext:
-          seccompProfile:
-            type: Unconfined
+        command: [ "start" ]
     statefulset:
+      podManagementPolicy: Parallel
       volumeClaimTemplates:
         - name: data
           mountPath: /data
@@ -32,6 +72,22 @@ service:
     type: ClusterIP
     ports:
       http:
-        port: 3001
-        targetPort: 3001
+        port: 3000
+        targetPort: 3000
         protocol: TCP
+  headless:
+    controller: main
+    type: ClusterIP
+    clusterIP: None
+    publishNotReadyAddresses: true
+    ports:
+      http:
+        port: 3000
+        targetPort: 3000
+        protocol: TCP
+
+secrets:
+  config:
+    enabled: true
+    stringData:
+      CLUSTER_ID: "some-cluster-id"
