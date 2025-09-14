@@ -16,14 +16,14 @@ The chart relies on the `bjw-s/common` library chart, which must be available in
 1. **Add the dependency repository:** Before installing, add the repository containing the `common` chart dependency.
 
    ```sh
-   helm repo add bjw-s-labs https://bjw-s-labs.github.io/helm-charts
+   helm repo add tigerbeetle-helm-charts https://vymalo.github.io/tigerbeetle-helm-charts
    ```
 
 2. **Install the chart:** Install the chart from the local path using the `helm install` command.
 
    ```sh
    # Navigate to the root of the tigerbeetle-helm project
-   helm install my-tigerbeetle-release ./charts/tigerbeetle
+   helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle
    ```
 
 ### Configuration
@@ -34,13 +34,13 @@ the `--set` flag.
 * **Using a custom values file:**
 
   ```sh
-  helm install my-tigerbeetle-release ./charts/tigerbeetle -f my-custom-values.yaml
+  helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle -f my-custom-values.yaml
   ```
 
 * **Using the `--set` flag:**
 
   ```sh
-  helm install my-tigerbeetle-release ./charts/tigerbeetle --set controllers.main.replicas=5
+  helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle --set controllers.main.replicas=5
   ```
 
 ## Important Configuration Options

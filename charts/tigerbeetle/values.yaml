@@ -1,5 +1,4 @@
 global:
-  version: "0.16.57"
   labels:
     cluster: tigerbeetle
 
@@ -26,7 +25,7 @@ controllers:
       format:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
-          tag: "{{ .Values.global.version }}"
+          tag: "{{ .Chart.AppVersion }}"
           pullPolicy: IfNotPresent
         imagePullPolicy: IfNotPresent
         command: [ "/bin/sh","-c" ]
@@ -54,7 +53,7 @@ controllers:
       main:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
-          tag: "{{ .Values.global.version }}"
+          tag: "{{ .Chart.AppVersion }}"
           pullPolicy: IfNotPresent
         command: [ "start" ]
     statefulset:
