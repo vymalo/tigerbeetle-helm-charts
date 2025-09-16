@@ -13,6 +13,11 @@ controllers:
         env:
           SVC: "{{ $.Release.Name }}-headless"
           PORT: "{{ include "tigerbeetle.port" $ }}"
+    containers:
+      addresses-watcher:
+        env:
+          SVC: "{{ $.Release.Name }}-headless"
+          PORT: "{{ include "tigerbeetle.port" $ }}"
 {{ end -}}
 configMaps:
   config:

@@ -39,53 +39,67 @@ controllers:
               fieldRef:
                 fieldPath: metadata.namespace
         command: [ "/bin/sh","-c" ]
-        args:
-          - |
-            set -eu
-            : "${NS:?}"; : "${SVC:?}"
-            RESOLVE_TIMEOUT_SECS="${RESOLVE_TIMEOUT_SECS:-60}"
-            SLEEP_SECS="${SLEEP_SECS:-2}"
-            PORT="${PORT:-}"
-            PORT_NAME="${PORT_NAME:-}"
-            IP_FAMILY="${IP_FAMILY:-}"
-            
-            # If a PORT_NAME is given, fetch its numeric port from the Service
-            if [ -z "$PORT" ] && [ -n "$PORT_NAME" ]; then
-              PORT="$(kubectl -n "$NS" get svc "$SVC" -o jsonpath="{.spec.ports[?(@.name=='$PORT_NAME')].port}" || true)"
+        args: |-
+          set -eu
+          log(){ printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+          
+          : "${NS:?}"; : "${SVC:?}"
+          RESOLVE_TIMEOUT_SECS="${RESOLVE_TIMEOUT_SECS:-60}"
+          SLEEP_SECS="${SLEEP_SECS:-2}"
+          PORT="${PORT:-}"
+          PORT_NAME="${PORT_NAME:-}"
+          IP_FAMILY="${IP_FAMILY:-}"
+          
+          log "kubectl: $(kubectl version --client=true --short 2>/dev/null || echo n/a)"
+          log "Namespace=$NS Service=$SVC PORT=${PORT:-<unset>} PORT_NAME=${PORT_NAME:-<unset>} IP_FAMILY=${IP_FAMILY:-both}"
+          
+          # Show current service + endpoints for context
+          kubectl -n "$NS" get svc "$SVC" -o wide || true
+          kubectl -n "$NS" get endpoints "$SVC" -o wide || true
+          kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" || true
+          
+          # Optionally resolve port by name
+          if [ -z "$PORT" ] && [ -n "$PORT_NAME" ]; then
+            PORT="$(kubectl -n "$NS" get svc "$SVC" -o jsonpath="{.spec.ports[?(@.name=='$PORT_NAME')].port}" || true)"
+            log "Resolved PORT_NAME='$PORT_NAME' -> PORT='$PORT'"
+          fi
+          [ -n "$PORT" ] || { log "ERROR: no PORT or PORT_NAME resolved"; exit 1; }
+          
+          end=$(( $(date +%s) + RESOLVE_TIMEOUT_SECS ))
+          attempt=0
+          while [ "$(date +%s)" -lt "$end" ]; do
+            attempt=$((attempt+1))
+            # Prefer classic Endpoints (includes notReadyAddresses)
+            EP_IPS="$(kubectl -n "$NS" get endpoints "$SVC" \
+                       -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+            # Fall back to EndpointSlices
+            if [ -z "$EP_IPS" ]; then
+              EP_IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
+                         -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
             fi
-            [ -n "$PORT" ] || { echo "ERROR: no PORT or PORT_NAME resolved"; exit 1; }
-            
-            end=$(( $(date +%s) + RESOLVE_TIMEOUT_SECS ))
-            while [ "$(date +%s)" -lt "$end" ]; do
-              # Try classic Endpoints first (ready + notReady)
-              IPS="$(kubectl -n "$NS" get endpoints "$SVC" -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
-            
-              # Fall back to EndpointSlices
-              if [ -z "$IPS" ]; then
-                IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
-                      -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
-              fi
-            
-              # Normalize, unique, optional family filter
-              IPS="$(printf '%s\n' "$IPS" | sed '/^$/d' | sort -u)"
-              if [ "$IP_FAMILY" = "ipv4" ]; then
-                IPS="$(printf '%s\n' "$IPS" | grep -E '^[0-9.]+$' || true)"
-              elif [ "$IP_FAMILY" = "ipv6" ]; then
-                IPS="$(printf '%s\n' "$IPS" | grep -E '^[0-9a-fA-F:]+$' || true)"
-              fi
-            
-              if [ -n "$IPS" ]; then
-                OUT="$(printf '%s\n' "$IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}')"
-                echo "$OUT" > /work/addresses.txt
-                echo "Resolved (API): $OUT"
-                exit 0
-              fi
-              sleep "$SLEEP_SECS"
-            done
-            
-            echo "ERROR: no endpoints found for Service '$SVC' in namespace '$NS'" >&2
-            exit 1
-
+          
+            # Normalize
+            EP_IPS="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | sort -u)"
+            case "$IP_FAMILY" in
+              ipv4) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9.]+$' || true)";;
+              ipv6) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9a-fA-F:]+$' || true)";;
+              *) :;;
+            esac
+          
+            COUNT="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | wc -l | tr -d ' ')"
+            log "Attempt #$attempt: found $COUNT IP(s)"
+            if [ "$COUNT" -gt 0 ]; then
+              OUT="$(printf '%s\n' "$EP_IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}')"
+              printf '%s\n' "$OUT" > /work/addresses.txt
+              log "Resolved (API): $OUT"
+              exit 0
+            fi
+          
+            sleep "$SLEEP_SECS"
+          done
+          
+          log "ERROR: no endpoints found for Service '$SVC' in namespace '$NS'"
+          exit 1
       format:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
@@ -138,6 +152,72 @@ controllers:
           allowPrivilegeEscalation: false
           capabilities:
             add: [ "IPC_LOCK" ]
+            
+      addresses-watcher:
+        image:
+          repository: bitnami/kubectl
+          tag: 1.33
+        
+        env:
+          RESOLVE_TIMEOUT_SECS: "90"
+          SLEEP_SECS: "3"
+          POLL_SECS: "10"
+          NS:
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        
+        command: ["/bin/sh","-c"]
+        
+        args: |
+          set -eu
+          log(){ printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+          
+          : "${NS:?}"; : "${SVC:?}"; : "${PORT:?}"
+          IP_FAMILY="${IP_FAMILY:-}"
+          POLL_SECS="${POLL_SECS:-10}"
+          RELOAD_URL="${RELOAD_URL:-}"
+          
+          out=/work/addresses.txt
+          tmp=/work/.addresses.new
+          
+          build(){
+            EP_IPS="$(kubectl -n "$NS" get endpoints "$SVC" \
+                       -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+            if [ -z "$EP_IPS" ]; then
+              EP_IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
+                         -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
+            fi
+            EP_IPS="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | sort -u)"
+            case "$IP_FAMILY" in
+              ipv4) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9.]+$' || true)";;
+              ipv6) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9a-fA-F:]+$' || true)";;
+              *) :;;
+            esac
+            printf '%s\n' "$EP_IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}' > "$tmp"
+          }
+          
+          ensure_out(){
+            [ -f "$out" ] || { echo > "$out"; }
+          }
+          
+          ensure_out
+          prev="$(cat "$out")"
+          log "Watcher starting; initial content: ${prev:-<empty>}"
+          while :; do
+            build
+            now="$(cat "$tmp")"
+            if ! cmp -s "$tmp" "$out"; then
+              mv -f "$tmp" "$out"
+              log "Addresses changed -> $now"
+              if [ -n "$RELOAD_URL" ]; then
+                # Optional: notify the app if it supports an HTTP reload
+                wget -qO- --timeout=2 "$RELOAD_URL" >/dev/null 2>&1 || log "Reload notify failed (ignored)"
+              fi
+            fi
+            sleep "$POLL_SECS"
+          done
+        
     statefulset:
       podManagementPolicy: Parallel
       volumeClaimTemplates:
@@ -184,11 +264,16 @@ persistence:
             subPath: addresses.txt
         resolve-addresses:
           - path: /work
+        addresses-watcher:
+          - path: /work
 
+# -- Configure the Roles and Role Bindings for the chart here.
 rbac:
   roles:
     endpointsReader:
+      # -- Enables or disables the Role. Can be templated.
       enabled: true
+      # -- Set to Role,ClusterRole
       type: Role
       rules:
         - apiGroups:
@@ -210,14 +295,18 @@ rbac:
 
   bindings:
     endpointsReaderBinding:
+      # -- Enables or disables the Role Binding. Can be templated.
       enabled: true
+      # -- Set to RoleBinding,ClusterRoleBinding
       type: RoleBinding
+      # -- Can be an identifier of rbac.roles or a custom name and kind
       roleRef:
         identifier: endpointsReader         # refers to rbac.roles.endpointsReader above
       subjects:
         - kind: ServiceAccount
           identifier: main
           namespace: "{{ .Release.Namespace }}"
+
 
 serviceAccount:
   main:
