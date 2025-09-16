@@ -11,7 +11,8 @@ controllers:
     initContainers:
       resolve-addresses:
         env:
-          RAW_ADDRESSES: {{ include "tigerbeetle.addresses" . }}
+          SVC: "{{ $.Release.Name }}-headless"
+          PORT: "{{ include "tigerbeetle.port" $ }}"
 {{ end -}}
 configMaps:
   config:
@@ -19,17 +20,6 @@ configMaps:
     data:
       REPLICA_COUNT: "{{ .Values.controllers.main.replicas }}"
 {{ end -}}
-
-{{- define "tigerbeetle.addresses" -}}
-{{- $name := $.Release.Name -}}
-{{- $fullname := include "bjw-s.common.lib.chart.names.fullname" $ -}}
-{{- $port := (include "tigerbeetle.port" $) -}}
-{{- $addresses := list -}}
-{{- range $i := until (.Values.controllers.main.replicas | int) -}}
-    {{- $addresses = append $addresses (printf "%s-%d.%s-headless:%v" $name $i $name $port) -}}
-{{- end -}}
-{{- join "," $addresses -}}
-{{- end -}}
 
 {{- define "tigerbeetle.port" -}}
 {{- .Values.service.main.ports.http.port | int -}}

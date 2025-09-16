@@ -13,9 +13,9 @@ defaultPodOptions:
               matchLabels:
                 cluster: tigerbeetle
             topologyKey: kubernetes.io/hostname
-  # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
-  # unless specific non-root user requirements are identified.
-      
+      # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
+      # unless specific non-root user requirements are identified.
+
 controllers:
   main:
     type: statefulset
@@ -23,31 +23,69 @@ controllers:
       securityContext:
         seccompProfile:
           type: Unconfined
+    serviceAccount:
+      identifier: main
     replicas: 3 # In the current version of TigerBeetle, cluster size can not be changed after creation, but this limitation will be lifted in the future.
     initContainers:
       resolve-addresses:
         image:
-          repository: bash
-          tag: "5.3"
+          repository: bitnami/kubectl
+          tag: "1.33"
         env:
-          GETENT_DB: ahostsv4
-        command: [ "/usr/bin/env", "bash", "-ceu", "--" ]
+          RESOLVE_TIMEOUT_SECS: "90"
+          SLEEP_SECS: "3"
+          NS:
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        command: [ "/bin/sh","-c" ]
         args:
           - |
-            OUT=""
-            IFS=',' read -r -a ITEMS <<< "$RAW_ADDRESSES"
-            for item in "${ITEMS[@]}"; do
-              host="${item%%:*}"
-              port="${item##*:}"
-              # Collect all unique IPs for this host (use head -n1 if you only want the first)
-              mapfile -t IPS < <(getent "$GETENT_DB" "$host" | awk '{print $1}' | sort -u)
-              for ip in "${IPS[@]}"; do
-                if [[ -n "$OUT" ]]; then OUT+=",${ip}:${port}"; else OUT="${ip}:${port}"; fi
-              done
+            set -eu
+            : "${NS:?}"; : "${SVC:?}"
+            RESOLVE_TIMEOUT_SECS="${RESOLVE_TIMEOUT_SECS:-60}"
+            SLEEP_SECS="${SLEEP_SECS:-2}"
+            PORT="${PORT:-}"
+            PORT_NAME="${PORT_NAME:-}"
+            IP_FAMILY="${IP_FAMILY:-}"
+            
+            # If a PORT_NAME is given, fetch its numeric port from the Service
+            if [ -z "$PORT" ] && [ -n "$PORT_NAME" ]; then
+              PORT="$(kubectl -n "$NS" get svc "$SVC" -o jsonpath="{.spec.ports[?(@.name=='$PORT_NAME')].port}" || true)"
+            fi
+            [ -n "$PORT" ] || { echo "ERROR: no PORT or PORT_NAME resolved"; exit 1; }
+            
+            end=$(( $(date +%s) + RESOLVE_TIMEOUT_SECS ))
+            while [ "$(date +%s)" -lt "$end" ]; do
+              # Try classic Endpoints first (ready + notReady)
+              IPS="$(kubectl -n "$NS" get endpoints "$SVC" -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+            
+              # Fall back to EndpointSlices
+              if [ -z "$IPS" ]; then
+                IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
+                      -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
+              fi
+            
+              # Normalize, unique, optional family filter
+              IPS="$(printf '%s\n' "$IPS" | sed '/^$/d' | sort -u)"
+              if [ "$IP_FAMILY" = "ipv4" ]; then
+                IPS="$(printf '%s\n' "$IPS" | grep -E '^[0-9.]+$' || true)"
+              elif [ "$IP_FAMILY" = "ipv6" ]; then
+                IPS="$(printf '%s\n' "$IPS" | grep -E '^[0-9a-fA-F:]+$' || true)"
+              fi
+            
+              if [ -n "$IPS" ]; then
+                OUT="$(printf '%s\n' "$IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}')"
+                echo "$OUT" > /work/addresses.txt
+                echo "Resolved (API): $OUT"
+                exit 0
+              fi
+              sleep "$SLEEP_SECS"
             done
             
-            printf '%s\n' "$OUT" > /work/addresses.txt
-            printf 'Resolved: %s\n' "$OUT"
+            echo "ERROR: no endpoints found for Service '$SVC' in namespace '$NS'" >&2
+            exit 1
+
       format:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
@@ -61,7 +99,7 @@ controllers:
           allowPrivilegeEscalation: false
           capabilities:
             add: [ "IPC_LOCK" ]
-            
+        
         args:
           - |
             set -xeuo pipefail
@@ -108,7 +146,7 @@ controllers:
           accessMode: "ReadWriteOnce"
           size: 1Gi
           storageClass: "" # Use default storage class or specify one
-          
+
 service:
   main:
     controller: main
@@ -134,7 +172,7 @@ secrets:
     enabled: true
     stringData:
       CLUSTER_ID: "some-cluster-id"
-      
+
 persistence:
   work:
     type: emptyDir
@@ -146,4 +184,42 @@ persistence:
             subPath: addresses.txt
         resolve-addresses:
           - path: /work
-    
+
+rbac:
+  roles:
+    endpointsReader:
+      enabled: true
+      type: Role
+      rules:
+        - apiGroups:
+            - "discovery.k8s.io"
+          resources:
+            - "endpointslices"
+          verbs:
+            - "get"
+            - "list"
+            - "watch" # watch is optional; keep if you might stream changes
+        - apiGroups:
+            - ""
+          resources:
+            - "endpoints"
+          verbs:
+            - "get"
+            - "list"
+            - "watch"
+
+  bindings:
+    endpointsReaderBinding:
+      enabled: true
+      type: RoleBinding
+      roleRef:
+        identifier: endpointsReader         # refers to rbac.roles.endpointsReader above
+      subjects:
+        - kind: ServiceAccount
+          identifier: main
+          namespace: "{{ .Release.Namespace }}"
+
+serviceAccount:
+  main:
+    enabled: true
+    annotations: { }
