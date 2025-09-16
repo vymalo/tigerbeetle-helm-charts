@@ -11,6 +11,7 @@ controllers:
     containers:
       main:
         args:
+          - start
           - --addresses={{ include "tigerbeetle.addresses" . }}
           - /data/data.tigerbeetle
 {{ end -}}

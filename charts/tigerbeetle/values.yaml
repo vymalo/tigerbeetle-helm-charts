@@ -15,17 +15,20 @@ defaultPodOptions:
             topologyKey: kubernetes.io/hostname
   # TigerBeetle typically runs as root, so we won't set runAsUser/Group here
   # unless specific non-root user requirements are identified.
-
+      
 controllers:
   main:
     type: statefulset
+    pod:
+      securityContext:
+        seccompProfile:
+          type: Unconfined
     replicas: 3 # In the current version of TigerBeetle, cluster size can not be changed after creation, but this limitation will be lifted in the future.
     initContainers:
       format:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
           tag: "{{ .Chart.AppVersion }}"
-          pullPolicy: IfNotPresent
         imagePullPolicy: IfNotPresent
         command: [ "/bin/sh","-c" ]
         
@@ -33,12 +36,12 @@ controllers:
           runAsNonRoot: true
           runAsUser: 10001
           allowPrivilegeEscalation: false
-          seccompProfile:
-            type: Unconfined
+          capabilities:
+            add: [ "IPC_LOCK" ]
             
         args:
           - |
-            set -euo pipefail
+            set -xeuo pipefail
             REPLICA_INDEX="${HOSTNAME##*-}"
             if [ -f "/data/data.tigerbeetle" ]; then
               echo "Data file already exists, skipping format."
@@ -47,6 +50,7 @@ controllers:
             
             echo "Formatting data file for replica index ${REPLICA_INDEX}"
             /tigerbeetle format \
+              --log-debug \
               --cluster="${CLUSTER_ID}" \
               --replica-count="${REPLICA_COUNT}" \
               --replica="${REPLICA_INDEX}" \
@@ -61,13 +65,13 @@ controllers:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
           tag: "{{ .Chart.AppVersion }}"
-          pullPolicy: IfNotPresent
-        command: [ "start" ]
         
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
           allowPrivilegeEscalation: false
+          capabilities:
+            add: [ "IPC_LOCK" ]
     statefulset:
       podManagementPolicy: Parallel
       volumeClaimTemplates:
