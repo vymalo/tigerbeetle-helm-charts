@@ -8,12 +8,10 @@ global:
 {{ if eq "statefulset" $.Values.controllers.main.type }}
 controllers:
   main:
-    containers:
-      main:
-        args:
-          - start
-          - --addresses={{ include "tigerbeetle.addresses" . }}
-          - /data/data.tigerbeetle
+    initContainers:
+      resolve-addresses:
+        env:
+          RAW_ADDRESSES: {{ include "tigerbeetle.addresses" . }}
 {{ end -}}
 configMaps:
   config:

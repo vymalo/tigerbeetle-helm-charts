@@ -25,6 +25,29 @@ controllers:
           type: Unconfined
     replicas: 3 # In the current version of TigerBeetle, cluster size can not be changed after creation, but this limitation will be lifted in the future.
     initContainers:
+      resolve-addresses:
+        image:
+          repository: bash
+          tag: "5.3"
+        env:
+          GETENT_DB: ahostsv4
+        command: [ "/usr/bin/env", "bash", "-ceu", "--" ]
+        args:
+          - |
+            OUT=""
+            IFS=',' read -r -a ITEMS <<< "$RAW_ADDRESSES"
+            for item in "${ITEMS[@]}"; do
+              host="${item%%:*}"
+              port="${item##*:}"
+              # Collect all unique IPs for this host (use head -n1 if you only want the first)
+              mapfile -t IPS < <(getent "$GETENT_DB" "$host" | awk '{print $1}' | sort -u)
+              for ip in "${IPS[@]}"; do
+                if [[ -n "$OUT" ]]; then OUT+=",${ip}:${port}"; else OUT="${ip}:${port}"; fi
+              done
+            done
+            
+            printf '%s\n' "$OUT" > /work/addresses.txt
+            printf 'Resolved: %s\n' "$OUT"
       format:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
@@ -66,6 +89,11 @@ controllers:
           repository: ghcr.io/tigerbeetle/tigerbeetle
           tag: "{{ .Chart.AppVersion }}"
         
+        args:
+          - start
+          - --addresses=$(cat /work/addresses.txt)
+          - /data/data.tigerbeetle
+        
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
@@ -106,3 +134,16 @@ secrets:
     enabled: true
     stringData:
       CLUSTER_ID: "some-cluster-id"
+      
+persistence:
+  work:
+    type: emptyDir
+    advancedMounts:
+      main:
+        main:
+          - path: /work/addresses.txt
+            readOnly: true
+            subPath: addresses.txt
+        resolve-addresses:
+          - path: /work
+    
