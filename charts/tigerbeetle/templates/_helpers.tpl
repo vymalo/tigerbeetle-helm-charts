@@ -9,12 +9,12 @@ global:
 controllers:
   main:
     initContainers:
-      resolve-addresses:
+      zaddresses:
         env:
           SVC: "{{ $.Release.Name }}-headless"
           PORT: "{{ include "tigerbeetle.port" $ }}"
     containers:
-      addresses-watcher:
+      zwatcher:
         env:
           SVC: "{{ $.Release.Name }}-headless"
           PORT: "{{ include "tigerbeetle.port" $ }}"

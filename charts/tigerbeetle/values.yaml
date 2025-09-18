@@ -3,7 +3,7 @@ global:
     cluster: tigerbeetle
 
 defaultPodOptions:
-  automountServiceAccountToken: false
+  automountServiceAccountToken: true
   affinity:
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -21,13 +21,17 @@ controllers:
     type: statefulset
     pod:
       securityContext:
-        seccompProfile:
-          type: Unconfined
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+    defaultContainerOptionsStrategy: merge
+    defaultContainerOptions:
+      image:
+        pullPolicy: IfNotPresent
     serviceAccount:
       identifier: main
     replicas: 3 # In the current version of TigerBeetle, cluster size can not be changed after creation, but this limitation will be lifted in the future.
     initContainers:
-      resolve-addresses:
+      zaddresses:
         image:
           repository: bitnami/kubectl
           tag: "1.33"
@@ -100,23 +104,25 @@ controllers:
           
           log "ERROR: no endpoints found for Service '$SVC' in namespace '$NS'"
           exit 1
-      format:
+      zformat:
         image:
           repository: ghcr.io/tigerbeetle/tigerbeetle
           tag: "{{ .Chart.AppVersion }}"
-        imagePullPolicy: IfNotPresent
         command: [ "/bin/sh","-c" ]
         
         securityContext:
+          runAsGroup: 10001
           runAsNonRoot: true
           runAsUser: 10001
           allowPrivilegeEscalation: false
           capabilities:
             add: [ "IPC_LOCK" ]
+          seccompProfile:
+            type: Unconfined
         
         args:
           - |
-            set -xeuo pipefail
+            set -euo pipefail
             REPLICA_INDEX="${HOSTNAME##*-}"
             if [ -f "/data/data.tigerbeetle" ]; then
               echo "Data file already exists, skipping format."
@@ -141,19 +147,34 @@ controllers:
           repository: ghcr.io/tigerbeetle/tigerbeetle
           tag: "{{ .Chart.AppVersion }}"
         
+        command: [ "/bin/sh","-c" ]
         args:
-          - start
-          - --addresses=$(cat /work/addresses.txt)
-          - /data/data.tigerbeetle
+          - |
+            set -xeuo pipefail
+            REPLICA_INDEX="${HOSTNAME##*-}"
+            if [ ! -f "/data/data.tigerbeetle" ]; then
+              echo "Data file doesn't exists, should 'format' first."
+              exit 1
+            fi
+
+            echo "$(cat /work/addresses.txt)"
+
+            echo "Formatting data file for replica index ${REPLICA_INDEX}"
+            /tigerbeetle start \
+              --addresses=$(cat /work/addresses.txt) \
+              /data/data.tigerbeetle
         
         securityContext:
+          runAsGroup: 10001
           runAsNonRoot: true
           runAsUser: 10001
           allowPrivilegeEscalation: false
           capabilities:
             add: [ "IPC_LOCK" ]
+          seccompProfile:
+            type: Unconfined
             
-      addresses-watcher:
+      zwatcher:
         image:
           repository: bitnami/kubectl
           tag: 1.33
@@ -259,12 +280,11 @@ persistence:
     advancedMounts:
       main:
         main:
-          - path: /work/addresses.txt
-            readOnly: true
-            subPath: addresses.txt
-        resolve-addresses:
           - path: /work
-        addresses-watcher:
+            readOnly: true
+        zaddresses:
+          - path: /work
+        zwatcher:
           - path: /work
 
 # -- Configure the Roles and Role Bindings for the chart here.
@@ -305,7 +325,6 @@ rbac:
       subjects:
         - kind: ServiceAccount
           identifier: main
-          namespace: "{{ .Release.Namespace }}"
 
 
 serviceAccount:
