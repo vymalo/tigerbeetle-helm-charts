@@ -33,7 +33,7 @@ controllers:
     initContainers:
       zaddresses:
         image:
-          repository: bitnami/kubectl
+          repository: bitnamilegacy/kubectl
           tag: "1.33"
         env:
           RESOLVE_TIMEOUT_SECS: "90"
@@ -176,7 +176,7 @@ controllers:
             
       zwatcher:
         image:
-          repository: bitnami/kubectl
+          repository: bitnamilegacy/kubectl
           tag: 1.33
         
         env:
