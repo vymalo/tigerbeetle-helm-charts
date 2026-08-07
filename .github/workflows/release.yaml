@@ -1,4 +1,4 @@
-name: Release Charts and Deploy Docs
+name: Lint, Build Docs, and Publish Chart
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Lint ${{ matrix.chart }}
     strategy:
-      matrix: 
+      matrix:
         chart:
           - tigerbeetle
     steps:
@@ -38,10 +38,10 @@ jobs:
         run: helm template .
 
 
-  publish-docs:
+  build-docs:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -60,20 +60,12 @@ jobs:
       - name: Build MkDocs site
         run: mkdocs build --clean
 
-      - name: Deploy MkDocs to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        if: github.ref == 'refs/heads/main'
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          keep_files: true
-  
-  release-charts:
+  publish-chart:
     needs:
-      - publish-docs
       - lint-test
+    if: github.ref == 'refs/heads/main'
     permissions:
-      contents: write
+      contents: read
       packages: write
     runs-on: ubuntu-latest
     steps:
@@ -82,26 +74,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-      - name: Install Helm
+      - name: Set up Helm
         uses: azure/setup-helm@v4
-        env:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Add repos to Helm
+      - name: Add Helm repos
         run: |
           helm repo add bjw-s https://bjw-s-labs.github.io/helm-charts
           helm repo update
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1
-        if: github.ref == 'refs/heads/main'
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-        with:
-          skip_existing: true
-          charts_dir: 'charts'
+      - name: Update chart dependencies
+        working-directory: charts/tigerbeetle
+        run: helm dependency update
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Package chart
+        working-directory: charts/tigerbeetle
+        run: helm package .
+
+      - name: Push chart to GHCR (OCI)
+        working-directory: charts/tigerbeetle
+        run: helm push tigerbeetle-*.tgz oci://ghcr.io/adorsys-gis/charts

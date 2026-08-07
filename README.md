@@ -9,22 +9,24 @@ storage for each node in the cluster, which is crucial for a distributed databas
 
 ## Installation and Configuration
 
-The chart relies on the `bjw-s/common` library chart, which must be available in your local Helm repository cache.
+> **The old `https://vymalo.github.io/tigerbeetle-helm-charts` Helm repository is retired.** This chart
+> moved from the `vymalo` GitHub org to `ADORSYS-GIS`, and GitHub Pages URLs are not redirected after an
+> org transfer — that URL now 404s. The chart is no longer published to GitHub Pages at all; it is
+> distributed as an **OCI artifact on GHCR** instead. If you (or a script, or a `Chart.yaml` dependency)
+> still reference the old `helm repo add` URL, switch to the `oci://` install form below.
+
+The chart relies on the `bjw-s/common` library chart, which is resolved automatically via `helm dependency
+update`/`helm install` — no separate repo needs to be added for it.
 
 ### Installation Steps
 
-1. **Add the dependency repository:** Before installing, add the repository containing the `common` chart dependency.
+Install the chart directly from GHCR using its OCI reference (replace `<x.y.z>` with the desired chart
+version from [Chart.yaml](charts/tigerbeetle/Chart.yaml) or the
+[GHCR package page](https://github.com/orgs/ADORSYS-GIS/packages/container/package/charts%2Ftigerbeetle)):
 
-   ```sh
-   helm repo add tigerbeetle-helm-charts https://vymalo.github.io/tigerbeetle-helm-charts
-   ```
-
-2. **Install the chart:** Install the chart from the local path using the `helm install` command.
-
-   ```sh
-   # Navigate to the root of the tigerbeetle-helm project
-   helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle
-   ```
+```sh
+helm install tigerbeetle oci://ghcr.io/adorsys-gis/charts/tigerbeetle --version <x.y.z>
+```
 
 ### Configuration
 
@@ -34,13 +36,13 @@ the `--set` flag.
 * **Using a custom values file:**
 
   ```sh
-  helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle -f my-custom-values.yaml
+  helm install tigerbeetle oci://ghcr.io/adorsys-gis/charts/tigerbeetle --version <x.y.z> -f my-custom-values.yaml
   ```
 
 * **Using the `--set` flag:**
 
   ```sh
-  helm install tigerbeetle-helm-charts/tigerbeetle tigerbeetle --set controllers.main.replicas=5
+  helm install tigerbeetle oci://ghcr.io/adorsys-gis/charts/tigerbeetle --version <x.y.z> --set controllers.main.replicas=5
   ```
 
 ## Important Configuration Options

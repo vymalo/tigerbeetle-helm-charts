@@ -1,8 +1,8 @@
 site_name: TigerBeetle Helm Chart
 site_description: Documentation for the TigerBeetle Helm Chart
-site_author: Vymalo
-repo_url: https://github.com/vymalo/tigerbeetle-helm-charts
-repo_name: vymalo/tigerbeetle-helm-charts
+site_author: ADORSYS-GIS
+repo_url: https://github.com/ADORSYS-GIS/tigerbeetle-helm-charts
+repo_name: ADORSYS-GIS/tigerbeetle-helm-charts
 
 theme:
   name: material
