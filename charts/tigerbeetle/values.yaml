@@ -1,3 +1,13 @@
+# NOTE on Chart.yaml's appVersion (currently 0.17.9): the zformat init
+# container (below) only ever formats a replica's data file if
+# /data/data.tigerbeetle doesn't already exist -- it never upgrades one in
+# place. That means this chart targets FRESH deployments only. TigerBeetle
+# 0.17.9's oldest upgradable replica version is 0.17.5, so an existing
+# 0.16.x cluster cannot be upgraded just by bumping this tag and re-rolling
+# the StatefulSet -- that requires a multi-hop upgrade chain (stepping the
+# cluster through each intermediate minimum-upgradable version in turn,
+# never jumping straight from 0.16.x to 0.17.9), which this chart does not
+# model at all -- it has no notion of a staged/partial-cluster rollout.
 global:
   labels:
     cluster: tigerbeetle
@@ -33,8 +43,17 @@ controllers:
     initContainers:
       zaddresses:
         image:
-          repository: bitnamilegacy/kubectl
-          tag: "1.33"
+          # bitnamilegacy/kubectl:1.33 was the frozen, unmaintained-since-
+          # 2025-08 legacy Bitnami registry -- replaced with alpine/k8s,
+          # which is actively maintained and (unlike registry.k8s.io/kubectl
+          # or rancher/kubectl, both distroless with no /bin/sh) still ships
+          # a shell, since this container is a `/bin/sh -c` script needing
+          # sort/awk/sed/wc/date/cmp/mv. Trade-off: alpine/k8s:1.36.1 is
+          # ~1.25GB vs. bitnamilegacy/kubectl's 439MB. The smaller official
+          # distroless image only becomes usable if these scripts are
+          # rewritten shell-free -- tech debt, not addressed by this change.
+          repository: alpine/k8s
+          tag: "1.36.1"
         env:
           RESOLVE_TIMEOUT_SECS: "90"
           SLEEP_SECS: "3"
@@ -42,67 +61,102 @@ controllers:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+        envFrom:
+          - configMapRef:
+              identifier: config
         command: [ "/bin/sh","-c" ]
+        # NOTE: TigerBeetle requires that the address at index N in
+        # `--addresses` be replica N's own address (src/vsr.zig, verified at
+        # tag 0.17.9; see https://docs.tigerbeetle.com/operating/deploying/).
+        # IP text sort order (the old `sort -u` here) has no relationship to
+        # StatefulSet ordinal, and podManagementPolicy: Parallel means IP
+        # allocation isn't even loosely correlated with it either. A DNS-name
+        # fix is not possible: parse_address in src/vsr.zig (0.17.9) is
+        # IP-literal only (no getaddrinfo anywhere in the parse path), so
+        # `tb-0.tb-headless...` yields error.AddressInvalid. The fix instead
+        # keeps IPs but orders them by pod ordinal, recovered from each
+        # endpoint's targetRef.name (e.g. "tb-2" -> ordinal 2). This must
+        # never emit a partial or misordered list -- see
+        # build_ordered_addresses below.
         args: |-
           set -eu
           log(){ printf '%s %s\n' "$(date -Iseconds)" "$*"; }
-          
-          : "${NS:?}"; : "${SVC:?}"
+
+          : "${NS:?}"; : "${SVC:?}"; : "${REPLICA_COUNT:?}"
           RESOLVE_TIMEOUT_SECS="${RESOLVE_TIMEOUT_SECS:-60}"
           SLEEP_SECS="${SLEEP_SECS:-2}"
           PORT="${PORT:-}"
           PORT_NAME="${PORT_NAME:-}"
           IP_FAMILY="${IP_FAMILY:-}"
-          
+
           log "kubectl: $(kubectl version --client=true --short 2>/dev/null || echo n/a)"
-          log "Namespace=$NS Service=$SVC PORT=${PORT:-<unset>} PORT_NAME=${PORT_NAME:-<unset>} IP_FAMILY=${IP_FAMILY:-both}"
-          
+          log "Namespace=$NS Service=$SVC Replicas=$REPLICA_COUNT PORT=${PORT:-<unset>} PORT_NAME=${PORT_NAME:-<unset>} IP_FAMILY=${IP_FAMILY:-both}"
+
           # Show current service + endpoints for context
           kubectl -n "$NS" get svc "$SVC" -o wide || true
           kubectl -n "$NS" get endpoints "$SVC" -o wide || true
           kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" || true
-          
+
           # Optionally resolve port by name
           if [ -z "$PORT" ] && [ -n "$PORT_NAME" ]; then
             PORT="$(kubectl -n "$NS" get svc "$SVC" -o jsonpath="{.spec.ports[?(@.name=='$PORT_NAME')].port}" || true)"
             log "Resolved PORT_NAME='$PORT_NAME' -> PORT='$PORT'"
           fi
           [ -n "$PORT" ] || { log "ERROR: no PORT or PORT_NAME resolved"; exit 1; }
-          
+
+          # Builds a comma-separated "ip:port" list, in StatefulSet-ordinal
+          # order, into $ORDERED. Both the EndpointSlice and classic
+          # Endpoints paths carry targetRef.name (the pod, e.g. "tb-2"),
+          # which is how the ordinal is recovered -- ordering below is
+          # identical either way, so the legacy fallback stays valid. Fails
+          # (non-zero, $ORDERED unset) unless all $REPLICA_COUNT ordinals
+          # 0..N-1 are currently known: a partial or wrongly-ordered list
+          # must never be written.
+          build_ordered_addresses(){
+            PAIRS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
+                       -o jsonpath='{range .items[*].endpoints[*]}{.targetRef.name}{"\t"}{.addresses[0]}{"\n"}{end}' 2>/dev/null || true)"
+            if [ -z "$PAIRS" ]; then
+              PAIRS="$(kubectl -n "$NS" get endpoints "$SVC" \
+                         -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\t"}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.targetRef.name}{"\t"}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+            fi
+            PAIRS="$(printf '%s\n' "$PAIRS" | sed '/^$/d')"
+
+            case "$IP_FAMILY" in
+              ipv4) PAIRS="$(printf '%s\n' "$PAIRS" | awk -F'\t' '$2 ~ /^[0-9.]+$/')";;
+              ipv6) PAIRS="$(printf '%s\n' "$PAIRS" | awk -F'\t' '$2 ~ /^[0-9a-fA-F:]+$/')";;
+              *) :;;
+            esac
+
+            ORDERED="$(printf '%s\n' "$PAIRS" | awk -F'\t' -v n_want="$REPLICA_COUNT" -v port="$PORT" '
+              NF != 2 || $1 == "" { next }
+              {
+                ord = $1; sub(/^.*-/, "", ord)
+                if (ord !~ /^[0-9]+$/) next
+                ip[ord] = $2
+              }
+              END {
+                for (i = 0; i < n_want; i++) if (!(i in ip)) exit 1
+                out = ""
+                for (i = 0; i < n_want; i++) { if (i > 0) out = out ","; out = out ip[i] ":" port }
+                print out
+              }')" || return 1
+            [ -n "$ORDERED" ]
+          }
+
           end=$(( $(date +%s) + RESOLVE_TIMEOUT_SECS ))
           attempt=0
           while [ "$(date +%s)" -lt "$end" ]; do
             attempt=$((attempt+1))
-            # Prefer classic Endpoints (includes notReadyAddresses)
-            EP_IPS="$(kubectl -n "$NS" get endpoints "$SVC" \
-                       -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
-            # Fall back to EndpointSlices
-            if [ -z "$EP_IPS" ]; then
-              EP_IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
-                         -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
-            fi
-          
-            # Normalize
-            EP_IPS="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | sort -u)"
-            case "$IP_FAMILY" in
-              ipv4) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9.]+$' || true)";;
-              ipv6) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9a-fA-F:]+$' || true)";;
-              *) :;;
-            esac
-          
-            COUNT="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | wc -l | tr -d ' ')"
-            log "Attempt #$attempt: found $COUNT IP(s)"
-            if [ "$COUNT" -gt 0 ]; then
-              OUT="$(printf '%s\n' "$EP_IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}')"
-              printf '%s\n' "$OUT" > /work/addresses.txt
-              log "Resolved (API): $OUT"
+            if build_ordered_addresses; then
+              printf '%s\n' "$ORDERED" > /work/addresses.txt
+              log "Attempt #$attempt: resolved ordinal-ordered addresses: $ORDERED"
               exit 0
             fi
-          
+            log "Attempt #$attempt: not all $REPLICA_COUNT replica ordinals known yet"
             sleep "$SLEEP_SECS"
           done
-          
-          log "ERROR: no endpoints found for Service '$SVC' in namespace '$NS'"
+
+          log "ERROR: could not resolve all $REPLICA_COUNT ordinal-ordered addresses for Service '$SVC' in namespace '$NS' within ${RESOLVE_TIMEOUT_SECS}s"
           exit 1
       zformat:
         image:
@@ -176,9 +230,12 @@ controllers:
             
       zwatcher:
         image:
-          repository: bitnamilegacy/kubectl
-          tag: 1.33
-        
+          # See the zaddresses init container above for why this is
+          # alpine/k8s (needs a shell) rather than bitnamilegacy/kubectl
+          # (frozen/unmaintained) or a distroless kubectl image.
+          repository: alpine/k8s
+          tag: "1.36.1"
+
         env:
           RESOLVE_TIMEOUT_SECS: "90"
           SLEEP_SECS: "3"
@@ -187,58 +244,90 @@ controllers:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
-        
+        envFrom:
+          - configMapRef:
+              identifier: config
+
         command: ["/bin/sh","-c"]
-        
+
+        # Same ordinal-ordering requirement and fix as the zaddresses init
+        # container above (see the comment there for the full rationale) --
+        # duplicated here, not shared, since containers in this chart don't
+        # share a script; keep the two build_ordered_addresses bodies in
+        # sync. The watcher additionally must never clobber a good,
+        # already-written addresses.txt with an incomplete one -- e.g. if a
+        # pod is briefly NotReady, that must not blank out a running
+        # cluster's address list.
         args: |
           set -eu
           log(){ printf '%s %s\n' "$(date -Iseconds)" "$*"; }
-          
-          : "${NS:?}"; : "${SVC:?}"; : "${PORT:?}"
+
+          : "${NS:?}"; : "${SVC:?}"; : "${PORT:?}"; : "${REPLICA_COUNT:?}"
           IP_FAMILY="${IP_FAMILY:-}"
           POLL_SECS="${POLL_SECS:-10}"
           RELOAD_URL="${RELOAD_URL:-}"
-          
+
           out=/work/addresses.txt
           tmp=/work/.addresses.new
-          
-          build(){
-            EP_IPS="$(kubectl -n "$NS" get endpoints "$SVC" \
-                       -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
-            if [ -z "$EP_IPS" ]; then
-              EP_IPS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
-                         -o jsonpath='{range .items[*].endpoints[*].addresses[*]}{.}{"\n"}{end}' 2>/dev/null || true)"
+
+          # Builds a comma-separated "ip:port" list, in StatefulSet-ordinal
+          # order, into $ORDERED. Fails (non-zero, $ORDERED unset) unless all
+          # $REPLICA_COUNT ordinals 0..N-1 are currently known.
+          build_ordered_addresses(){
+            PAIRS="$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$SVC" \
+                       -o jsonpath='{range .items[*].endpoints[*]}{.targetRef.name}{"\t"}{.addresses[0]}{"\n"}{end}' 2>/dev/null || true)"
+            if [ -z "$PAIRS" ]; then
+              PAIRS="$(kubectl -n "$NS" get endpoints "$SVC" \
+                         -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\t"}{.ip}{"\n"}{end}{range .subsets[*].notReadyAddresses[*]}{.targetRef.name}{"\t"}{.ip}{"\n"}{end}' 2>/dev/null || true)"
             fi
-            EP_IPS="$(printf '%s\n' "$EP_IPS" | sed '/^$/d' | sort -u)"
+            PAIRS="$(printf '%s\n' "$PAIRS" | sed '/^$/d')"
+
             case "$IP_FAMILY" in
-              ipv4) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9.]+$' || true)";;
-              ipv6) EP_IPS="$(printf '%s\n' "$EP_IPS" | grep -E '^[0-9a-fA-F:]+$' || true)";;
+              ipv4) PAIRS="$(printf '%s\n' "$PAIRS" | awk -F'\t' '$2 ~ /^[0-9.]+$/')";;
+              ipv6) PAIRS="$(printf '%s\n' "$PAIRS" | awk -F'\t' '$2 ~ /^[0-9a-fA-F:]+$/')";;
               *) :;;
             esac
-            printf '%s\n' "$EP_IPS" | awk -v p="$PORT" 'BEGIN{ORS=""; c=0} NF{if(c++){printf ","}; printf $0 ":" p}' > "$tmp"
+
+            ORDERED="$(printf '%s\n' "$PAIRS" | awk -F'\t' -v n_want="$REPLICA_COUNT" -v port="$PORT" '
+              NF != 2 || $1 == "" { next }
+              {
+                ord = $1; sub(/^.*-/, "", ord)
+                if (ord !~ /^[0-9]+$/) next
+                ip[ord] = $2
+              }
+              END {
+                for (i = 0; i < n_want; i++) if (!(i in ip)) exit 1
+                out = ""
+                for (i = 0; i < n_want; i++) { if (i > 0) out = out ","; out = out ip[i] ":" port }
+                print out
+              }')" || return 1
+            [ -n "$ORDERED" ]
           }
-          
+
           ensure_out(){
-            [ -f "$out" ] || { echo > "$out"; }
+            [ -f "$out" ] || { : > "$out"; }
           }
-          
+
           ensure_out
           prev="$(cat "$out")"
           log "Watcher starting; initial content: ${prev:-<empty>}"
           while :; do
-            build
-            now="$(cat "$tmp")"
-            if ! cmp -s "$tmp" "$out"; then
-              mv -f "$tmp" "$out"
-              log "Addresses changed -> $now"
-              if [ -n "$RELOAD_URL" ]; then
-                # Optional: notify the app if it supports an HTTP reload
-                wget -qO- --timeout=2 "$RELOAD_URL" >/dev/null 2>&1 || log "Reload notify failed (ignored)"
+            if build_ordered_addresses; then
+              printf '%s\n' "$ORDERED" > "$tmp"
+              if ! cmp -s "$tmp" "$out"; then
+                mv -f "$tmp" "$out"
+                log "Addresses changed -> $ORDERED"
+                if [ -n "$RELOAD_URL" ]; then
+                  # Optional: notify the app if it supports an HTTP reload
+                  wget -qO- --timeout=2 "$RELOAD_URL" >/dev/null 2>&1 || log "Reload notify failed (ignored)"
+                fi
               fi
+            else
+              log "Not all $REPLICA_COUNT replica ordinals currently known; keeping existing addresses.txt untouched"
             fi
             sleep "$POLL_SECS"
           done
-        
+
     statefulset:
       podManagementPolicy: Parallel
       volumeClaimTemplates:
